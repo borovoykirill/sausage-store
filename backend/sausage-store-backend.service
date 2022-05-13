@@ -1,0 +1,22 @@
+[Unit]
+Description=Sausage-store
+
+[Service]
+User=jarservice
+EnvironmentFile=/etc/sysconfig/sausage-store
+StandardOutput=file:/log/out.log
+Restart=always
+ExecStart=/bin/bash -c 'source /etc/sysconfig/sausage-store && /usr/bin/java \
+-Dmyserver.basePath='/home/jarservice/' \
+-Dmyserver.bindAddr='127.0.0.1' \
+-Dmyserver.bindPort='8080' \
+-Dmyserver.hostName='Sausage-store' \
+-Dspring.datasource.url=jdbc:postgresql://$PSQL_HOST:$PSQL_PORT/$PSQL_DBNAME \
+-Dspring.datasource.username=$PSQL_USER \
+-Dspring.datasource.password=$PSQL_PASSWORD \
+-Dspring.data.mongodb.uri=mongodb://$MONGODB_USER:$MONGODB_PASS@$MONGODB_HOST:$MONGODB_PORT/$MONGODB_DB?tls=false \
+-jar '/home/jarservice/sausage-store.jar''
+SuccessExitStatus=143
+
+[Install]
+WantedBy=multi-user.target

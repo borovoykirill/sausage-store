@@ -1,0 +1,48 @@
+variables:
+  VERSION: 1.0.${CI_PIPELINE_ID}
+         
+stages:
+  - vault-deploy
+  - helm-release
+  - argocd-deploy
+
+include:
+  - project: 'templates/ci'
+    file: 'DockerInDockerTemplate.yml'
+
+vault-deploy:
+  stage: vault-deploy
+  image: stanbtkv/alpine-ssh:3.15
+  before_script:
+    - eval $(ssh-agent -s)
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add -
+    - mkdir -p ~/.ssh
+    - mkdir -p ~/.kube
+    - chmod 700 ~/.ssh
+    - echo "$SSH_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+    - chmod 644 ~/.ssh/known_hosts
+  script:
+    - ssh ${DEV_USER}@${DEV_HOST}
+      "export "VAULT_TOKEN=${VAULT_TOKEN}";
+       export "VAULT_SECRETS_BASE64=${VAULT_SECRETS_BASE64}";
+      /bin/bash -s " < ./argocd/vault-deploy.sh
+
+helm-release:
+  stage: helm-release
+  image: stanbtkv/alpine-helm-ssh:3.8.1
+  script:
+    - cd argocd
+    - helm package . --app-version ${VERSION} --version ${VERSION}
+    - curl -u "${NEXUS_REPO_USER}:${NEXUS_REPO_PASS}" --upload-file ./sausage-store-${VERSION}.tgz ${NEXUS_HELM_REPO_URL}/sausage-store-${VERSION}.tgz
+
+
+argocd-deploy:
+  stage: argocd-deploy
+  image: stanbtkv/alpine-argocd:3.8.1
+  environment:
+    name: Kubernetes
+    url: ${KUBERNETES_DEPLOY_URL}
+  script:
+    - argocd app list --auth-token ${STAN_ARGOCD_TOKEN} --server ${STAN_ARGOCD_URL} --grpc-web
+    - argocd app sync --auth-token ${ARGO_TOKEN} ${STAN_ARGOCD_APP_NAME} --server ${STAN_ARGOCD_URL} --grpc-web
+

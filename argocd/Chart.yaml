@@ -1,0 +1,17 @@
+---
+apiVersion: v2
+type: application
+name: sausage-store
+description: Sausage Store Helm Chart
+icon: https://cncf-branding.netlify.app/img/projects/helm/horizontal/color/helm-horizontal-color.png
+
+version: 1.0.1
+appVersion: "1.0.1"
+
+dependencies:
+  - name: backend
+    version: ~1.0
+  - name: backend-report
+    version: ~1.0
+  - name: frontend
+    version: ~1.0

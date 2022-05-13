@@ -1,0 +1,137 @@
+variables:
+  VERSION: 1.0.${CI_PIPELINE_ID}
+  SAST_EXCLUDED_ANALYZERS: eslint, nodejs-scan
+  ARTIFACT_COMPRESSION_LEVEL: fastest
+  CACHE_COMPRESSION_LEVEL: fastest
+  # JAVA_TOOL_OPTIONS: "-Xms1g -Xmx1g"
+  # CI_DEBUG_TRACE: "true"
+  # SECURE_LOG_LEVEL: "debug"
+             
+   
+# https://docs.gitlab.com/ee/ci/docker/using_docker_build.html#use-the-kubernetes-executor-with-docker-in-docker
+# https://gitlab.praktikum-services.ru/templates/ci/-/blob/main/DockerInDockerTemplate.yml
+# использовать в задачах сборки в качестве образа стабильную версию образа Docker:dind docker:20.10.12-dind-rootless
+ 
+stages:
+  - build
+  - test
+  - sonarqube-test
+  - release
+  - docker-build
+  - slack-notification
+ 
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - project: 'templates/ci'
+    file: 'DockerInDockerTemplate.yml'
+
+build:
+  stage: build
+  cache:
+    - key: backend
+      paths:
+        - ${CI_PROJECT_DIR}/.m2/repository/
+  script:
+    - echo CI_COMMIT_REF_SLUG $CI_COMMIT_REF_SLUG
+    - echo CI_JOB_ID ${CI_JOB_ID}
+    - echo "ARTIFACT_JOB_ID=${CI_JOB_ID}" > CI_JOB_ID.txt
+    - cd ${CI_PROJECT_DIR}/backend
+    - mvn package -Dversion.application=${VERSION} -Dmaven.repo.local=${CI_PROJECT_DIR}/.m2/repository
+    - cd ..
+    - mv backend/target/sausage-store-${VERSION}.jar backend/sausage-store-${VERSION}.jar # Исправление ошибки "SpotBugs didn't find any class file to analyze in ... "
+#  rules:
+#    - changes:
+#      - backend/*
+  artifacts:
+    paths:
+      - backend/sausage-store-${VERSION}.jar
+    expire_in: 2 hrs
+    reports:
+      dotenv: CI_JOB_ID.txt
+
+
+spotbugs-sast:
+  stage: test
+  cache:
+    - key: backend
+      paths:
+        - ${CI_PROJECT_DIR}/.m2/repository/
+  variables:
+    COMPILE: "false"
+    MAVEN_REPO_PATH: ${CI_PROJECT_DIR}/.m2/repository
+  allow_failure: true
+
+sonarcube_backend:
+  stage: sonarqube-test
+  only:
+    changes:
+      - backend/**/*
+  image: maven:3.8-openjdk-16
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar" # Defines the location of the analysis task cache https://docs.sonarqube.org/8.5/analysis/gitlab-cicd/
+    SONAR_HOST_URL: "$SONARQUBE_URL"
+    SONAR_TOKEN: "$SONARQUBE_BACKEND_ACCESS_TOKEN"
+    GIT_DEPTH: "0"
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+  script:
+    - cd backend
+    - mvn verify sonar:sonar -DskipTests -Dsonar.projectKey="$SONARQUBE_BACKEND_PROJECT_KEY" -Dsonar.projectName="01_STANISLAV_BITKOV_BACKEND"
+  when: manual
+  allow_failure: true
+
+release-backend:
+  stage: release
+  cache:
+    - key: backend
+      paths:
+        - ${CI_PROJECT_DIR}/.m2/repository # Сохранение зависимостей для SAST
+  script: # Сохраняем артефакт сборки бэкенда в Nexus и GitLab Package Registry
+    - cd backend
+    - mvn deploy -e -DskipTests -Dversion.application=${VERSION} -Dmaven.repo.local=${CI_PROJECT_DIR}/.m2/repository -s settings.xml
+    - echo "Get artifact from job ${ARTIFACT_JOB_ID}" 
+    - > # скачивание артефакта в файл sausage-store-backend-${VERSION}.zip
+      curl --location --output sausage-store-backend-${VERSION}.zip -H "PRIVATE-TOKEN: ${SAUSAGE_STORE_PROJECT_TOKEN}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/jobs/${ARTIFACT_JOB_ID}/artifacts"
+    - > # сохранение артефакта в GitLab Package Registry
+      curl -sSL -H "JOB-TOKEN: ${CI_JOB_TOKEN}" -T sausage-store-backend-${VERSION}.zip "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/sausage-store/${CI_COMMIT_SHA}/"
+#  rules:
+#    - changes:
+#      - backend/*
+
+docker-backend-image-build:
+  stage: docker-build
+  image: docker:20.10.12-dind-rootless
+  before_script:
+    - until docker info; do sleep 1; done
+    # переменные CI_REGISTRY_USER, CI_REGISTRY_PASSWORD, CI_REGISTRY генерятся Гитлабом, их задавать не надо
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - cd backend
+    - >
+      docker build
+      --build-arg VERSION=$VERSION
+      --tag $CI_REGISTRY_IMAGE/sausage-backend:$VERSION
+      --tag $CI_REGISTRY_IMAGE/sausage-backend:latest
+      .
+    - docker push $CI_REGISTRY_IMAGE/sausage-backend:$VERSION
+    - docker push $CI_REGISTRY_IMAGE/sausage-backend:latest
+
+
+slack-notification-backend:
+  variables:
+    GIT_STRATEGY: none
+  stage: slack-notification
+  needs:
+    - release-backend
+  when: manual
+  allow_failure: true
+  cache: []
+  script:
+    - >
+      curl -X POST -H 'Content-type: application/json'
+      --data '{"text":"Вышла новая версия сосисочной - '${VERSION}'.
+      Скачать бэкенд можно по ссылке - 
+      '${NEXUS_REPO_URL}'/'${NEXUS_REPO_BACK}'/'${VERSION}'/sausage-store-'${VERSION}'.jar"}'
+      $SLACK_NOTIFICATION_URL

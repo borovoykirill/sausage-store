@@ -1,0 +1,133 @@
+variables:
+  VERSION: 1.0.${CI_PIPELINE_ID}
+  SAST_EXCLUDED_ANALYZERS: semgrep, spotbugs
+  ARTIFACT_COMPRESSION_LEVEL: fastest
+  CACHE_COMPRESSION_LEVEL: fastest
+  #CI_DEBUG_TRACE: "true"
+  #SECURE_LOG_LEVEL: "debug"
+                  
+stages:
+  - build
+  - test
+  - sonarqube-test
+  - release
+  - docker-build
+  - slack-notification
+   
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - project: 'templates/ci'
+    file: 'DockerInDockerTemplate.yml'
+ 
+build:
+  stage: build
+  cache:
+  - key: $CI_COMMIT_REF_SLUG_frontend
+    paths:
+      - frontend/node_modules
+  script:
+    - echo "ARTIFACT_JOB_ID=${CI_JOB_ID}" > CI_JOB_ID.txt
+    - cd frontend
+    - npm install
+    - npm run build
+    - cd ..
+    - mkdir sausage-store-${VERSION}
+    - mv frontend/dist/frontend sausage-store-${VERSION}/public_html
+    - echo "folder_content"
+    - ls -alht
+    - ls -alht ..
+  artifacts:
+    paths:
+      - sausage-store-${VERSION}/public_html
+    expire_in: 2 hrs
+    reports:
+      dotenv: CI_JOB_ID.txt
+#  rules:
+#    - changes:
+#      - frontend/*
+
+spotbugs-sast:
+  stage: test
+  variables:
+    COMPILE: "false"
+    MAVEN_REPO_PATH: ${CI_PROJECT_DIR}/.m2/repository
+  allow_failure: true
+
+
+sonarcube_frontend:
+  stage: sonarqube-test
+  only:
+    changes:
+      - frontend/**/*
+  image:
+    name: sonarsource/sonar-scanner-cli:latest
+    entrypoint: [""]
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+    SONAR_HOST_URL: "$SONARQUBE_URL"
+    SONAR_TOKEN: "$SONARQUBE_FRONTEND_ACCESS_TOKEN"
+    GIT_DEPTH: "0"
+  script:
+    - cd frontend
+    - sonar-scanner -Dsonar.projectKey="$SONARQUBE_FRONTEND_PROJECT_KEY" -Dsonar.sources=.
+  when: manual
+  allow_failure: true
+
+release:
+  stage: release
+  script: # Сохраняем артефакт сборки фронтенда в Nexus и GitLab Package Registry
+    - tar czvf sausage-store-${VERSION}.tar.gz sausage-store-${VERSION}
+    - curl -v -u "${NEXUS_REPO_USER}:${NEXUS_REPO_PASS}" --upload-file sausage-store-${VERSION}.tar.gz ${NEXUS_REPO_URL}/sausage-store-bitkov-stanislav-frontend/sausage-store/${VERSION}/sausage-store-${VERSION}.tar.gz
+    - echo "Get artifact from job ${ARTIFACT_JOB_ID}" 
+    - > # скачивание артефакта в файл sausage-store-frontend-${VERSION}.zip
+      curl --location --output sausage-store-frontend-${VERSION}.zip -H "PRIVATE-TOKEN: ${SAUSAGE_STORE_PROJECT_TOKEN}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/jobs/${ARTIFACT_JOB_ID}/artifacts"
+    - > # сохранение артефакта в GitLab Package Registry
+      curl -sSL -H "JOB-TOKEN: ${CI_JOB_TOKEN}" -T sausage-store-frontend-${VERSION}.zip "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/sausage-store/${CI_COMMIT_SHA}/"
+#  rules:
+#    - changes:
+#      - frontend/*
+   
+# --tag $CI_REGISTRY_IMAGE/sausage-frontend:latest
+# - docker push $CI_REGISTRY_IMAGE/sausage-frontend:latest
+# тэг latest ставится на последнюю версию docker image, но при деплое используется конкретная версия
+
+docker-frontend-image-build:
+  stage: docker-build
+  image: docker:20.10.12-dind-rootless
+  before_script:
+    - until docker info; do sleep 1; done
+    # переменные CI_REGISTRY_USER, CI_REGISTRY_PASSWORD, CI_REGISTRY генерятся Гитлабом, их задавать не надо
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - cd frontend
+    - echo "folder_content"
+    - ls -alht
+    - ls -alht ..
+    - ls -alht  ../sausage-store-${VERSION}/public_html
+    - mv ../sausage-store-${VERSION}/ .
+    - >
+      docker build
+      --build-arg VERSION=$VERSION
+      --tag $CI_REGISTRY_IMAGE/sausage-frontend:$VERSION
+      --tag $CI_REGISTRY_IMAGE/sausage-frontend:latest
+      .
+    - docker push $CI_REGISTRY_IMAGE/sausage-frontend:$VERSION
+    - docker push $CI_REGISTRY_IMAGE/sausage-frontend:latest
+
+slack-notification-frontend:
+  variables:
+    GIT_STRATEGY: none
+  stage: slack-notification
+  needs:
+    - release
+  when: manual
+  allow_failure: true
+  cache: []
+  script:
+    - >
+      curl -X POST -H 'Content-type: application/json'
+      --data '{"text":"Вышла новая версия сосисочной - '${VERSION}'.
+      Скачать фронт можно по ссылке - 
+      '${NEXUS_REPO_URL}'/'${NEXUS_REPO_FRONT}'/'${VERSION}'/sausage-store-'${VERSION}'.tar.gz"}'
+      $SLACK_NOTIFICATION_URL
+ 
